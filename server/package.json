@@ -1,0 +1,13 @@
+{
+  "name": "agon-agent-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Server-side proxy for InfiniSynapse Server API (keeps API key off the frontend).",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
