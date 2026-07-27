@@ -10,6 +10,12 @@
 // Keys stay server-side only. Frontend talks to /api/* here (Vite dev proxy).
 import http from 'node:http';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DIST = path.resolve(__dirname, '..', 'dist');
 
 const KEY = process.env.INFINISYNAPSE_API_KEY;
 const SERVER = process.env.INFINISYNAPSE_SERVER || 'https://app.infinisynapse.cn';
@@ -20,14 +26,12 @@ const CBD_CEO_MODEL = process.env.CBD_CEO_MODEL || 'gpt-5.5'; // cbd CEO (ChatGP
 const PORT = Number(process.env.PORT || 8787);
 const AGENT_TIMEOUT_MS = Number(process.env.AGENT_TIMEOUT_MS || 150000);
 
-if (!KEY) {
-  console.error('[server] FATAL: INFINISYNAPSE_API_KEY is not set. Export it before starting.');
-  process.exit(1);
-}
-if (!FAVOR_KEY) {
-  console.error('[server] FATAL: FAVOR_API_KEY is not set (needed for the CEO tier).');
-  process.exit(1);
-}
+// API keys are needed only for the live /api analysis. Missing them must NOT
+// crash the server (otherwise the whole site is unreachable) — we warn and
+// let the frontend still serve, with /api returning a clear error.
+const KEYS_OK = Boolean(KEY && FAVOR_KEY);
+if (!KEY) console.warn('[server] WARN: INFINISYNAPSE_API_KEY not set — /api analysis will error.');
+if (!FAVOR_KEY) console.warn('[server] WARN: FAVOR_API_KEY not set — CEO tier will fail.');
 
 // ECHO_GATE: a prompt-only phrase used to recognise OUR task's user-echo on the
 // globally-broadcast SSE wire. It never appears verbatim in model answers, so the echo
@@ -261,14 +265,19 @@ const server = http.createServer(async (req, res) => {
 
   // Generalized live analysis stream, scenario-selected.
   if (path === '/api/analysis/stream') {
-    const scenario = url.searchParams.get('scenario') || 'cbd-office';
-    const cfg = getConfig(scenario);
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
     });
+    if (!KEYS_OK) {
+      sseWrite(res, 'error', { message: 'Server is missing INFINISYNAPSE_API_KEY / FAVOR_API_KEY environment variables.' });
+      res.end();
+      return;
+    }
+    const scenario = url.searchParams.get('scenario') || 'cbd-office';
+    const cfg = getConfig(scenario);
     sseWrite(res, 'start', { total: cfg.agents.length, ceoModel: cfg.ceoModel, scenario: cfg.name });
     try {
       await runAll(res, scenario);
@@ -279,11 +288,51 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Static frontend (production build in dist/). Serves the SPA + assets.
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    serveStatic(req, res);
+    return;
+  }
+
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ error: 'not found' }));
 });
 
-server.listen(PORT, () => {
+// ---- Zero-dep static file serving (built Vite app) ------------------------
+const MIME = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.mjs': 'text/javascript',
+  '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml',
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
+  '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.woff': 'font/woff', '.txt': 'text/plain',
+};
+function serveStatic(req, res) {
+  let urlPath;
+  try { urlPath = decodeURIComponent(new URL(req.url, `http://localhost:${PORT}`).pathname); }
+  catch { urlPath = '/'; }
+  if (urlPath === '/') urlPath = '/index.html';
+  const filePath = path.normalize(path.join(DIST, urlPath));
+  if (!filePath.startsWith(DIST)) { res.writeHead(403); res.end(); return; } // path traversal guard
+  fs.readFile(filePath, (err, data) => {
+    if (!err) {
+      const ext = path.extname(filePath).toLowerCase();
+      res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': 'public, max-age=3600' });
+      res.end(data);
+      return;
+    }
+    // SPA fallback → index.html
+    fs.readFile(path.join(DIST, 'index.html'), (e2, html) => {
+      if (e2) {
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Frontend not built. Run `npm run build` first.');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+    });
+  });
+}
+
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`[server] two-tier proxy listening on http://localhost:${PORT}`);
   for (const [id, c] of Object.entries(CONFIG)) {
     console.log(`[server] scenario=${id}  tier1=${SERVER} (${c.agents.length} agents)  tier2=${FAVOR} (CEO: ${c.ceoModel})`);

@@ -18,8 +18,8 @@ export default defineConfig(async ({ mode }) => {
   }
 
   return {
-    // Serve under /test2 so v1 (root) stays online while v2 is tested
-    base: '/test2/',
+    // Served at the site root on Railway (default domain).
+    base: '/',
     plugins,
     envPrefix: ['VITE_', 'NEXT_PUBLIC_'],
     define: processEnvDefines,
